@@ -27,6 +27,7 @@ jobs:
         shell: pwsh
         run: ./scripts/build-native.ps1 -Check
       - name: Desktop tests
+        if: always() && !cancelled()
         shell: pwsh
         run: ./scripts/dotnet.ps1 test AirFlash.sln '-p:RestoreLockedMode=true' --logger 'trx;LogFileName=protocol-tests.trx'
       - name: Publish test executable

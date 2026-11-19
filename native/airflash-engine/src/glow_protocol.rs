@@ -41,7 +41,7 @@ impl Default for Identity {
 }
 
 fn dict(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
-    Value::Dictionary(entries.into_iter().map(|(k, v)| (k.into(), v)).collect::<Dictionary>())
+    Value::Dictionary(entries.into_iter().map(|(k, v)| (k.to_owned(), v)).collect::<Dictionary>())
 }
 fn int(value: u64) -> Value { Value::Integer(value.into()) }
 fn string(value: &str) -> Value { Value::String(value.into()) }
