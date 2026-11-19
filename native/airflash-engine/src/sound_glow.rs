@@ -50,6 +50,7 @@ pub struct Command {
 struct State {
     command: Option<Command>,
     unavailable: Option<String>,
+    comparison: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Control(Arc<Mutex<State>>);
@@ -57,6 +58,7 @@ impl Control {
     pub fn set(&self, command: Command) -> Result<()> {
         ensure!(command.sequence > 0, "sequence must be positive");
         let mut current = self.0.lock().unwrap();
+        ensure!(!current.comparison, "fixed-input protocol comparison is active; reconnect to change artwork");
         if let Some(error) = &current.unavailable {
             anyhow::bail!("Sound Glow worker unavailable: {error}");
         }
@@ -73,7 +75,13 @@ impl Control {
         self.0.lock().unwrap().command
     }
     pub fn is_active(&self) -> bool {
-        self.latest().is_some()
+        let state = self.0.lock().unwrap();
+        state.command.is_some() || state.comparison
+    }
+    pub fn reserve_comparison(&self) {
+        let mut state = self.0.lock().unwrap();
+        state.command = None;
+        state.comparison = true;
     }
     pub fn disable(&self, error: String) {
         let mut state = self.0.lock().unwrap();
@@ -102,6 +110,7 @@ fn metadata(palette: Palette) -> Vec<u8> {
 }
 
 pub struct Peer {
+    pub identity: crate::glow_protocol::Identity,
     pub host: String,
     pub uri: String,
     pub session: Option<String>,
@@ -142,6 +151,73 @@ pub struct Worker {
     pub events: mpsc::Receiver<Value>,
 }
 impl Worker {
+    pub fn start_comparison(peers: Vec<Peer>, experiment: crate::glow_protocol::Experiment) -> Result<Self> {
+        let stop = Cancellation::default();
+        let done = stop.clone();
+        let (tx, events) = mpsc::sync_channel(64);
+        let handle = thread::Builder::new().name("sound-glow-protocol".into()).spawn(move || {
+            use crate::glow_protocol as mr;
+            use std::time::{Instant, SystemTime};
+            let started = Instant::now();
+            let wait_until = |seconds: u64| -> Result<()> {
+                while started.elapsed() < Duration::from_secs(seconds) {
+                    done.check()?;
+                    thread::sleep(Duration::from_millis(20));
+                }
+                done.check()
+            };
+            if wait_until(1).is_err() { return; }
+            for peer in &peers {
+                let send = |part: &str, body: Result<Vec<u8>>, mrp: bool, content_type: &str| -> bool {
+                    let result = body.and_then(|body| {
+                        done.check()?;
+                        if mrp {
+                            let mut connection = loop {
+                                done.check()?;
+                                match peer.connection.try_lock() {
+                                    Ok(conn) => break conn,
+                                    Err(TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(2)),
+                                    Err(TryLockError::Poisoned(e)) => anyhow::bail!("{e}"),
+                                }
+                            };
+                            let mut headers = vec![("Content-Type", content_type.to_owned()),
+                                ("DACP-ID", peer.identity.dacp_id.clone()), ("Active-Remote", "1".to_owned())];
+                            if let Some(session) = &peer.session { headers.push(("Session", session.clone())); }
+                            connection.request_cancellable("POST", "/command", &headers, &body, Some(&done))?;
+                        } else { send_part(peer, content_type, &body, &done)?; }
+                        Ok(body.len())
+                    });
+                    let _ = tx.try_send(json!({"event":"sound_glow_protocol_result", "host":peer.host,
+                        "part":part,"media_remote":experiment.media_remote,"accepted":result.is_ok(),
+                        "status":if result.is_ok() { Some(200) } else { None },
+                        "bytes":result.as_ref().ok(),"elapsed_ms":started.elapsed().as_millis(),
+                        "message":result.as_ref().err().map(|e|format!("{e:#}")),"light_verified":false}));
+                    result.is_ok()
+                };
+                let mut accepted = send("DMAP metadata", Ok(mr::metadata()), false, "application/x-dmap-tagged");
+                if wait_until(3).is_err() { return; }
+                accepted = accepted && send("Fixed JPEG", Ok(mr::ART.to_vec()), false, "image/jpeg");
+                if experiment.media_remote && accepted {
+                    let parts = [
+                        ("DEVICE_INFO", mr::device_info(&peer.identity)),
+                        ("updateMRNowPlayingInfo", mr::now_playing(started.elapsed().as_secs_f64(), SystemTime::now())),
+                        ("updateMRSupportedCommands", mr::supported_commands()),
+                        ("updateMRPlaybackState", mr::playback_state()),
+                        ("updateMRNowPlayingClient", mr::now_playing_client()),
+                    ];
+                    for (part, body) in parts {
+                        if !send(part, body, true, "application/x-apple-binary-plist") { accepted = false; break; }
+                    }
+                }
+                let _ = tx.try_send(json!({"event":"sound_glow_protocol_ready", "host":peer.host,
+                    "media_remote":experiment.media_remote,"accepted":accepted,"artwork_sha256":mr::artwork_hash(),
+                    "message":if accepted { "Fixed input published; observe native light after initialization" }
+                        else { "Incomplete protocol setup; do not count this trial as a negative lighting result" },
+                    "light_verified":false}));
+            }
+        })?;
+        Ok(Self { stop, handle:Some(handle), events })
+    }
     pub fn start(peers: Vec<Peer>, control: Control) -> Result<Self> {
         let stop = Cancellation::default();
         let done = stop.clone();
@@ -197,6 +273,58 @@ mod tests {
     use std::{io::Write, net::TcpListener};
 
     #[test]
+    fn protocol_toggle_changes_only_native_state_and_never_animates_artwork() {
+        for mrp in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let connection = Connection::connect(listener.local_addr().unwrap(), Cancellation::default()).unwrap();
+            let (socket, _) = listener.accept().unwrap();
+            let expected = if mrp { 7 } else { 2 };
+            let server = thread::spawn(move || {
+                let mut writer = socket.try_clone().unwrap();
+                let mut parser = Connection::from_stream(socket, Cancellation::default()).unwrap();
+                let mut requests = Vec::new();
+                for _ in 0..expected {
+                    let request = parser.read_for(Duration::from_secs(6), None).unwrap().unwrap();
+                    write!(writer,"RTSP/1.0 200 OK\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n",request.headers["cseq"]).unwrap();
+                    requests.push(request);
+                }
+                assert!(parser.read_for(Duration::from_millis(600), None).unwrap().is_none());
+                requests
+            });
+            let worker = Worker::start_comparison(vec![Peer {
+                identity: Default::default(), host:"127.0.0.1".into(), uri:"rtsp://127.0.0.1/test".into(),
+                session:Some("session-test".into()), connection:Arc::new(Mutex::new(connection)),
+                position:Arc::new(AtomicU64::new(position(7,44100))),
+            }], crate::glow_protocol::Experiment { media_remote:mrp }).unwrap();
+            for _ in 0..expected {
+                let event=worker.events.recv_timeout(Duration::from_secs(6)).unwrap();
+                assert_eq!(event["accepted"],true);
+            }
+            assert_eq!(worker.events.recv_timeout(Duration::from_secs(1)).unwrap()["event"],"sound_glow_protocol_ready");
+            let requests = server.join().unwrap();
+            assert_eq!(requests[0].body,crate::glow_protocol::metadata());
+            assert_eq!(requests[1].body,crate::glow_protocol::ART);
+            for request in &requests[..2] { assert!(request.first.starts_with("SET_PARAMETER ")); }
+            let expected_types=[None,Some("updateMRNowPlayingInfo"),Some("updateMRSupportedCommands"),Some("updateMRPlaybackState"),Some("updateMRNowPlayingClient")];
+            for (request,kind) in requests[2..].iter().zip(expected_types) {
+                assert_eq!(request.first,"POST /command RTSP/1.0");
+                let body=plist::Value::from_reader(std::io::Cursor::new(&request.body)).unwrap();
+                assert_eq!(body.as_dictionary().unwrap().get("type").and_then(plist::Value::as_string),kind);
+            }
+            drop(worker);
+        }
+    }
+    #[test]
+    fn reserved_comparison_blocks_normal_metadata_even_after_failure() {
+        let control=Control::default();
+        control.reserve_comparison();
+        assert!(control.is_active());
+        assert!(control.set(Command { sequence:1,palette:Palette::Red }).is_err());
+        control.disable("worker failed".into());
+        assert!(control.is_active());
+    }
+
+    #[test]
     fn palettes_reach_all_peers_and_one_rejection_does_not_stop_others() {
         for palette in [
             Palette::MetadataOnly,
@@ -248,6 +376,7 @@ mod tests {
                     }
                 }));
                 peers.push(Peer {
+                    identity: Default::default(),
                     host: format!("peer-{index}"),
                     uri: "/test".into(),
                     session: None,
@@ -318,6 +447,7 @@ mod tests {
                 .unwrap();
             let worker = Worker::start(
                 vec![Peer {
+                    identity: Default::default(),
                     host: "peer".into(),
                     uri: "/test".into(),
                     session: None,
@@ -364,6 +494,7 @@ mod tests {
             .unwrap();
         let worker = Worker::start(
             vec![Peer {
+                    identity: Default::default(),
                 host: "peer".into(),
                 uri: "/test".into(),
                 session: None,
@@ -426,6 +557,7 @@ mod tests {
         let control = Control::default();
         let worker = Worker::start(
             vec![Peer {
+                    identity: Default::default(),
                 host: "127.0.0.1".into(),
                 uri: "rtsp://127.0.0.1/test".into(),
                 session: Some("session-123".into()),
@@ -487,6 +619,7 @@ mod tests {
             .unwrap();
         let worker = Worker::start(
             vec![Peer {
+                    identity: Default::default(),
                 host: "127.0.0.1".into(),
                 uri: "rtsp://127.0.0.1/test".into(),
                 session: None,

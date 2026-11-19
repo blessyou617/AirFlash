@@ -1499,3 +1499,13 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Sound Glow Protocol v1 experiment (2026-11-20)
+
+MediaRemote wire-format reference: music-assistant/airplay-cli,
+commit 0a58c239d5fb3cf8927b9707a71c6fe897266b6a, src/ap2_mrp.c.
+Copyright (C) 2024-2026 Music Assistant Contributors.
+That reference file is licensed under Apache-2.0. The license is included
+as LICENSE-Airplay-MRP-Apache-2.0.txt in this experimental distribution.
+The experiment is a modified AirFlash build distributed under GPLv3+;
+complete corresponding source is included in Source.zip.

@@ -1,0 +1,73 @@
+name: Sound Glow protocol test build
+on:
+  push:
+    branches: [codex/sound-glow-protocol-v1]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+          python-version: '3.12'
+      - name: Prepare dependencies
+        shell: pwsh
+        run: uv sync --locked
+      - name: Rust tests, lint and Windows engine
+        shell: pwsh
+        run: ./scripts/build-native.ps1 -Check
+      - name: Desktop tests
+        shell: pwsh
+        run: ./scripts/dotnet.ps1 test AirFlash.sln '-p:RestoreLockedMode=true' --logger 'trx;LogFileName=protocol-tests.trx'
+      - name: Publish test executable
+        shell: pwsh
+        run: |
+          ./scripts/dotnet.ps1 publish AirFlash.App/AirFlash.App.csproj -c Release -r win-x64 --self-contained true '-p:IncludeNativeLibrariesForSelfExtract=true' '-p:RestoreLockedMode=true' '-p:Version=0.7.0' '-p:InformationalVersion=0.7.0-dev.soundglow-protocol-v1' -o (Join-Path (Get-Location).Path 'artifacts/protocol-package')
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Verify packaged startup and export fixed inputs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = (Resolve-Path artifacts/protocol-package/AirFlash.exe).Path
+          foreach ($check in @('self-check', 'compat-check')) {
+            $report = [IO.Path]::GetFullPath("artifacts/protocol-package/$check.json")
+            $process = Start-Process -FilePath $exe -ArgumentList @("--$check", '--output', ('"' + $report + '"')) -PassThru -WindowStyle Hidden
+            if (-not $process.WaitForExit(30000)) { $process.Kill(); throw "$check timed out" }
+            if ($process.ExitCode -ne 0 -or -not (Get-Content $report -Raw | ConvertFrom-Json).ok) { throw "$check failed" }
+          }
+          cargo run --manifest-path native/airflash-engine/Cargo.toml --locked --example glow_fixture -- artifacts/protocol-package/reference
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Copy-Item docs/SOUND-GLOW-PROTOCOL.zh-CN.md artifacts/protocol-package/README.zh-CN.md
+          Copy-Item LICENSE,LICENSE-GPLv3,docs/LICENSE-Airplay-MRP-Apache-2.0.txt artifacts/protocol-package/
+          Copy-Item scripts/sound_glow_reference.py artifacts/protocol-package/reference/
+          Copy-Item artifacts/compatibility/bundle-audit.json artifacts/protocol-package/
+          git archive --format=zip -o artifacts/protocol-package/Source.zip HEAD
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          @{ version='0.7.0-dev.soundglow-protocol-v1'; source=$env:GITHUB_SHA; reference='music-assistant/airplay-cli@0a58c239d5fb3cf8927b9707a71c6fe897266b6a'; built_at_utc=[DateTime]::UtcNow.ToString('O'); engine_sha256=(Get-FileHash native/airflash-engine/target/release/airflash-engine.exe -Algorithm SHA256).Hash; exe_sha256=(Get-FileHash $exe -Algorithm SHA256).Hash } | ConvertTo-Json | Set-Content artifacts/protocol-package/build-info.json -Encoding utf8
+          Get-ChildItem artifacts/protocol-package -File -Recurse | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.FullName.Substring((Resolve-Path artifacts/protocol-package).Path.Length+1) } | Set-Content artifacts/protocol-package/SHA256SUMS.txt -Encoding utf8
+      - name: Upload test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirFlash-SoundGlow-Protocol-v1-win-x64
+          path: artifacts/protocol-package/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload check evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoundGlow-Protocol-checks
+          path: |
+            artifacts/compatibility/*.json
+            desktop/**/TestResults/*.trx
+          retention-days: 30

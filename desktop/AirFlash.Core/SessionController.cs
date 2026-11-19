@@ -35,6 +35,8 @@ public sealed class SessionController(IEngineFactory factory, IAudioService audi
         IEngineConnection connection; string session; CancellationToken lifetime; long epoch;
         lock (_sync)
         {
+            if (_settings.GlowComparison is not null)
+                throw new InvalidOperationException("固定输入对照中不能切换封面；请先恢复普通播放。");
             if (_snapshot.State != PlaybackState.Streaming || _connection is null || _sessionId is null || _lifetime is null)
                 throw new InvalidOperationException(L.Get("Start streaming before testing Sound Glow."));
             if (!_soundGlowSupported)
@@ -148,7 +150,7 @@ public sealed class SessionController(IEngineFactory factory, IAudioService audi
         }
         await SendEqualizerAsync(sequence, CancellationToken.None).ConfigureAwait(false);
     }
-    private EqualizerSettings EffectiveEqualizer() { lock (_sync) return (_equalizerPreview ?? _settings.Equalizer).Clone(); }
+    private EqualizerSettings EffectiveEqualizer() { lock (_sync) return (_settings.GlowComparison is not null ? _settings.Equalizer : _equalizerPreview ?? _settings.Equalizer).Clone(); }
     private async Task SendEqualizerAsync(long? expectedSequence = null, CancellationToken cancellation = default)
     {
         await _equalizerWriter.WaitAsync(cancellation).ConfigureAwait(false);
@@ -159,7 +161,7 @@ public sealed class SessionController(IEngineFactory factory, IAudioService audi
             {
                 if (_equalizerDisposed || !_equalizerReady || expectedSequence is { } expected && expected != _equalizerSequence) return;
                 connection = _connection; session = _sessionId; epoch = _generation;
-                equalizer = (_equalizerPreview ?? _settings.Equalizer).Clone(); sequence = _equalizerSequence;
+                equalizer = (_settings.GlowComparison is not null ? _settings.Equalizer : _equalizerPreview ?? _settings.Equalizer).Clone(); sequence = _equalizerSequence;
                 if (sequence == 0) sequence = ++_equalizerSequence;
             }
             if (connection is null || session is null) return;
@@ -426,6 +428,9 @@ public sealed class SessionController(IEngineFactory factory, IAudioService audi
         await _serial.WaitAsync().ConfigureAwait(false);
         try
         {
+            // Device-volume persistence also calls this with the normal app
+            // settings. It must not silently replace a test's fixed profile.
+            if (_settings.GlowComparison is not null) return;
             var old = _settings;
             if (_receiver is { IsSoftwareGroup: true } group && settings.SoftwareGroups.All(g => g.Id != group.Id))
             { await StopLockedAsync().ConfigureAwait(false); _receiver = null; _settings = settings.Clone(); Publish(_generation, PlaybackState.Idle); return; }
@@ -460,6 +465,7 @@ public sealed class SessionController(IEngineFactory factory, IAudioService audi
         await _serial.WaitAsync().ConfigureAwait(false);
         try
         {
+            if (_settings.GlowComparison is not null) return;
             if (_receiver is not { } previous) return;
             if (Snapshot.IsActive && Snapshot.State != PlaybackState.Pairing && ConnectionChanges(previous, _settings, receiver, settings) is { Length: > 0 } changes)
                 await StartLockedAsync(receiver, settings, null, "settings_change", changes).ConfigureAwait(false);
@@ -734,6 +740,8 @@ public sealed class SessionController(IEngineFactory factory, IAudioService audi
                     lock (_sync) { if (epoch == _generation) _soundGlowSupported = EngineHandshake.HasCapability(hello, "sound_glow_test"); }
                     _confirmedLeadSupported = EngineHandshake.HasCapability(hello, "adaptive_lead_v2");
                     EngineHandshake.RequireStreamingCapabilities(hello);
+                    if (settings.GlowComparison is not null)
+                        EngineHandshake.RequireCapabilities(hello, "sound_glow_protocol_v1", "initial_volume");
                     EngineHandshake.RequireCapabilities(hello, "standby_release");
                     var restoreVolume = EngineHandshake.HasCapability(hello, "initial_volume");
                     if (!EngineHandshake.HasCapability(hello, "receiver_ownership_guard"))
@@ -770,6 +778,11 @@ public sealed class SessionController(IEngineFactory factory, IAudioService audi
                     {
                         var groupMode = receiver.IsSoftwareGroup ? (receiver.GroupMode.Length > 0 ? receiver.GroupMode : "software_stereo") : receiver.IsGroup ? "native_stereo" : "single";
                         var startParameters = JsonSerializer.SerializeToNode(new { peers, group_mode = groupMode, group_id = receiver.IsGroup && !receiver.IsSoftwareGroup ? receiver.StereoId : null, source = settings.CaptureMode == "application" ? "application" : "loopback", capture_application_path = settings.CaptureMode == "application" ? settings.CaptureApplicationPath : null, capture_process_id = settings.CaptureMode == "application" ? settings.CaptureApplicationInstance?.ProcessId : null, capture_process_started_at = settings.CaptureMode == "application" ? settings.CaptureApplicationInstance?.StartedAt : null, standby = StandbyParameters(settings, receiver.Id), duration_ms = 0, latency_ms = _adaptiveBase, gain = Gain(receiver), timing = "ptp", capture_endpoint = settings.EffectiveEndpoint, sample_rate = sampleRate, equalizer = EffectiveEqualizer().WireParameters() })!.AsObject();
+                        if (settings.GlowComparison is { } comparison)
+                        {
+                            startParameters["glow_protocol"] = JsonSerializer.SerializeToNode(new { media_remote = comparison.MediaRemote });
+                            if (comparison.TestAudio) startParameters["source"] = "glow_test";
+                        }
                         if (forceLatency) startParameters["force_latency"] = true;
                         startParameters["intent"] = attemptIntent == SessionStartIntent.Manual ? "manual" : "automatic";
                         if (adaptiveMode && _confirmedLeadSupported)
@@ -1023,7 +1036,7 @@ public sealed class SessionController(IEngineFactory factory, IAudioService audi
                     return;
                 }
                 var recoveryAllowed = _settings.ForceReconnect || receiver.IsSoftwareGroup || notice.Code is "timeline_expired" or "clock_lost" or "adaptive_rebuild" || (recovering && (notice.Code is "host_error" or "network_error" || notice.Retryable == true));
-                if (!recoveryAllowed || attempts > _settings.MaxReconnectAttempts || notice.Retryable == false || notice.Retryable is null && IsAuthenticationFailure(error.Message)) return;
+                if (_settings.GlowComparison is not null || !recoveryAllowed || attempts > _settings.MaxReconnectAttempts || notice.Retryable == false || notice.Retryable is null && IsAuthenticationFailure(error.Message)) return;
                 recovering = true;
                 // This is the one reconnect notion the desktop already has; the
                 // companion record only reports it, it does not add a second one.

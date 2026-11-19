@@ -1,34 +1,52 @@
 <UserControl x:Class="AirFlash.App.Ui.SoundGlowPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:loc="clr-namespace:AirFlash.App.Ui"
              UseLayoutRounding="True">
   <StackPanel>
     <Border Style="{StaticResource Card}">
       <StackPanel>
-        <TextBlock Text="{loc:Text 'Sound Glow experiment'}" Style="{StaticResource SectionTitle}"/>
-        <TextBlock Text="{loc:Text 'Enable Sound Glow in the Home app, then stream audio. This experiment sends synthetic song information and test covers.'}" Style="{StaticResource Hint}"/>
-        <TextBlock x:Name="StateText" TextWrapping="Wrap" Margin="0,12,0,0" AutomationProperties.LiveSetting="Polite"/>
-        <Border x:Name="Swatch" Height="60" CornerRadius="6" Background="Gray" Margin="0,12,0,12"/>
-        <WrapPanel x:Name="Actions" IsEnabled="False">
-          <Button Content="{loc:Text 'Song information only'}" Tag="metadata_only" Click="OnPaletteClick" Margin="0,0,8,8" Padding="10,6"/>
-          <Button Content="{loc:Text 'Red'}" Tag="red" Click="OnPaletteClick" Margin="0,0,8,8" Padding="10,6"/>
-          <Button Content="{loc:Text 'Blue'}" Tag="blue" Click="OnPaletteClick" Margin="0,0,8,8" Padding="10,6"/>
-          <Button Content="{loc:Text 'Green'}" Tag="green" Click="OnPaletteClick" Margin="0,0,8,8" Padding="10,6"/>
+        <TextBlock Text="Sound Glow · 协议对照 v1" Style="{StaticResource SectionTitle}"/>
+        <TextBlock Text="先在主界面连接 HomePod 并设好音量，在家庭 App 打开 Sound Glow。随后依次测试 A、B、C、D。每次点击都会断开并重新连接。" Style="{StaticResource Hint}"/>
+        <TextBlock x:Name="StateText" TextWrapping="Wrap" Margin="0,12,0,8" AutomationProperties.LiveSetting="Polite"/>
+        <ComboBox x:Name="SourceChoice" SelectedIndex="0" Margin="0,4,0,10" AutomationProperties.Name="测试音频来源">
+          <ComboBoxItem Content="内置音频：64 秒循环，每组从头播放"/>
+          <ComboBoxItem Content="电脑音频：使用当前采集设置，手动重播同一首歌"/>
+        </ComboBox>
+        <TextBlock Text="内置音频：0–8 秒静音；8–24 秒强弱鼓点；24–40 秒鼓点＋旋律；40–56 秒稳定音；56–64 秒静音。" Style="{StaticResource Hint}" Margin="0,0,0,10"/>
+        <UniformGrid x:Name="Actions" Columns="2" IsEnabled="False">
+          <Button Content="A · 实时 / MR 关" Tag="A" Click="OnCaseClick" Margin="0,0,8,8" Padding="8,10"/>
+          <Button Content="B · 实时 / MR 开" Tag="B" Click="OnCaseClick" Margin="0,0,0,8" Padding="8,10"/>
+          <Button Content="C · 缓冲 / MR 关" Tag="C" Click="OnCaseClick" Margin="0,0,8,8" Padding="8,10"/>
+          <Button Content="D · 缓冲 / MR 开" Tag="D" Click="OnCaseClick" Margin="0,0,0,8" Padding="8,10"/>
+        </UniformGrid>
+        <TextBlock x:Name="TrialText" Text="尚未开始对照" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,4,0,8"/>
+        <TextBlock x:Name="NegotiatedText" TextWrapping="Wrap" Margin="0,0,0,8"/>
+        <TextBlock Text="四组使用同一张粉／紫／青／黑封面，播放中不换图。MR 开启时添加 airplay-cli 风格的 MediaRemote 状态。收到 200 仅代表请求被接受，灯光是否跟拍由你观察。" Style="{StaticResource Hint}"/>
+        <WrapPanel Margin="0,12,0,0">
+          <Button x:Name="StopButton" Content="停止测试" Click="OnStopClick" Margin="0,0,8,8" Padding="10,6"/>
+          <Button x:Name="ResetButton" Content="恢复普通播放 / 重置对照" Click="OnResetClick" Margin="0,0,0,8" Padding="10,6"/>
         </WrapPanel>
-        <CheckBox x:Name="Cycle" Content="{loc:Text 'Random color every 15 seconds'}" Margin="0,8,0,8" Checked="OnCycleChecked" Unchecked="OnCycleUnchecked" IsEnabled="False"/>
-        <Button x:Name="SoundGlowReset" Click="OnResetClick" HorizontalAlignment="Stretch" Margin="0,4,0,8" AutomationProperties.Name="{loc:Text 'Restore normal playback (stop and reconnect)'}">
-          <TextBlock Text="{loc:Text 'Restore normal playback (stop and reconnect)'}" TextWrapping="Wrap"/>
-        </Button>
-        <TextBlock Text="{loc:Text 'Try song information, then red and blue. Song information alone does not clear an old cover; reconnect first.'}" Style="{StaticResource Hint}" Margin="0,4,0,0"/>
       </StackPanel>
     </Border>
     <Border Style="{StaticResource Card}">
       <StackPanel>
-        <TextBlock Text="{loc:Text 'Log'}" Style="{StaticResource SectionTitle}"/>
-        <TextBox x:Name="SoundGlowLog" Height="160" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" VerticalContentAlignment="Top" AutomationProperties.Name="{loc:Text 'Log'}"/>
-        <Button Content="{loc:Text 'Open diagnostic logs'}" Click="OnOpenLogsClick" HorizontalAlignment="Left" Margin="0,10,0,0"/>
-        <TextBlock Text="{loc:Text 'No test covers are sent by default. Accepted requests do not prove visible lighting. Leaving this page stops cycling; the last cover may remain.'}" Style="{StaticResource Hint}" Margin="0,12,0,0"/>
+        <TextBlock Text="记录本轮观察" Style="{StaticResource SectionTitle}"/>
+        <ComboBox x:Name="Observation" SelectedIndex="0" Margin="0,0,0,8">
+          <ComboBoxItem Content="未观察 / 不确定"/>
+          <ComboBoxItem Content="只有颜色或持续动画，没有跟拍"/>
+          <ComboBoxItem Content="随强弱变化，但与鼓点不同步"/>
+          <ComboBoxItem Content="明显跟随鼓点和强弱"/>
+          <ComboBoxItem Content="没有灯效"/>
+          <ComboBoxItem Content="音频或连接失败（无效轮次）"/>
+        </ComboBox>
+        <TextBox x:Name="Notes" MinHeight="50" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" ToolTip="可补充 HomePod 系统版本、音量、卡顿等情况"/>
+        <WrapPanel Margin="0,8,0,8">
+          <Button Content="保存本轮观察" Click="OnSaveObservation" Margin="0,0,8,0" Padding="10,6"/>
+          <Button Content="导出完整测试记录" Click="OnExportClick" Padding="10,6"/>
+        </WrapPanel>
+        <TextBox x:Name="SoundGlowLog" Height="190" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" VerticalContentAlignment="Top" AutomationProperties.Name="协议测试记录"/>
+        <Button Content="打开诊断日志" Click="OnOpenLogsClick" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+        <TextBlock Text="首次点击时锁定设备、采集设置和音量。改变这些条件后请重置对照。建议测试 A→B→A，再测 C→D→C；初始化完成后再观察。" Style="{StaticResource Hint}" Margin="0,12,0,0"/>
       </StackPanel>
     </Border>
   </StackPanel>

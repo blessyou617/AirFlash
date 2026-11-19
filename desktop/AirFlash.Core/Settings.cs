@@ -88,6 +88,7 @@ public sealed class SoftwareStereoGroup : ObservableObject
 public sealed record ManualReceiver(string Id, string Name, string Host, int Port);
 public sealed class AppSettings : ObservableObject
 {
+    [JsonIgnore] public SoundGlowComparison? GlowComparison { get; set; }
     /// <summary>Schema 5 introduces the mixed-group invariant (QUESTIONS Q45).</summary>
     public const int CurrentSchemaVersion = 5;
     /// <summary>
@@ -139,7 +140,7 @@ public sealed class AppSettings : ObservableObject
     public string? CaptureApplicationPath { get => _CaptureApplicationPath; set => Set(ref _CaptureApplicationPath, value); }
     private CaptureApplication? _CaptureApplicationInstance;
     [JsonIgnore] public CaptureApplication? CaptureApplicationInstance { get => _CaptureApplicationInstance; set => Set(ref _CaptureApplicationInstance, value); }
-    public bool ShouldMuteEndpoint => MuteWhileStreaming && CaptureMode != "application";
+    public bool ShouldMuteEndpoint => MuteWhileStreaming && CaptureMode != "application" && GlowComparison?.TestAudio != true;
     public void RefreshCaptureEndpoint() => Notify(nameof(CaptureEndpoint));
     private int _MasterVolume = 100;
     public int MasterVolume { get => _MasterVolume; set => Set(ref _MasterVolume, value); }
@@ -264,6 +265,7 @@ public sealed class AppSettings : ObservableObject
     {
         var clone = JsonSerializer.Deserialize<AppSettings>(JsonSerializer.Serialize(this, JsonOptions), JsonOptions)!;
         clone.CaptureApplicationInstance = CaptureApplicationInstance;
+        clone.GlowComparison = GlowComparison;
         return clone;
     }
     public static readonly string[] Modes = ["realtime", "normal", "buffered", "custom", LatencyPolicy.Mode];

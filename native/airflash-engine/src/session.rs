@@ -53,6 +53,8 @@ fn default_sample_rate() -> u32 {
 pub struct ProbeOptions {
     #[serde(skip)]
     pub sound_glow: crate::sound_glow::Control,
+    #[serde(default)]
+    pub glow_protocol: Option<crate::glow_protocol::Experiment>,
     pub peers: Vec<Peer>,
     #[serde(default)]
     pub intent: StartIntent,
@@ -139,7 +141,8 @@ impl ProbeOptions {
     pub fn validate_start(&self) -> Result<()> {
         self.validate_forced_latency()?;
         ensure!(
-            matches!(self.source.as_str(), "loopback" | "application") && self.duration_ms == 0,
+            (matches!(self.source.as_str(), "loopback" | "application")
+                || self.source == "glow_test" && self.glow_protocol.is_some()) && self.duration_ms == 0,
             "start requires unbounded live source"
         );
         ensure!(
@@ -411,6 +414,7 @@ fn authenticate_with<C, T>(
 }
 
 struct Member {
+    glow_identity: crate::glow_protocol::Identity,
     compat: crate::profile::CompatProfile,
     peer: Peer,
     conn: std::sync::Arc<std::sync::Mutex<Connection>>,
@@ -703,6 +707,7 @@ impl Member {
             packetizer.enable_alac();
         }
         let mut member = Self {
+            glow_identity: crate::glow_protocol::Identity { group_uuid: options.group_id.clone(), ..Default::default() },
             compat,
             peer: peer.clone(),
             conn: std::sync::Arc::new(std::sync::Mutex::new(conn)),
@@ -734,7 +739,7 @@ impl Member {
             ("deviceID", string(sender_id)),
             ("macAddress", string(sender_id)),
             ("name", string("AirFlash")),
-            ("sessionUUID", string(Uuid::new_v4().to_string())),
+            ("sessionUUID", string(member.glow_identity.session_uuid.clone())),
             ("timingProtocol", string(member.compat.timing_protocol())),
             ("isMultiSelectAirPlay", Value::Boolean(true)),
             ("groupContainsGroupLeader", Value::Boolean(false)),
@@ -1561,7 +1566,11 @@ pub fn probe_with_all_controls(
 ) -> Result<()> {
     if options.duration_ms == 0 {
         options.validate_start()?;
-        run_live(options, cancel, gain, volume, equalizer, standby, emit)
+        if options.source == "glow_test" {
+            run_session(options, cancel, gain, volume, equalizer, emit, (Clock::new(), None))
+        } else {
+            run_live(options, cancel, gain, volume, equalizer, standby, emit)
+        }
     } else {
         run_session(
             options,
@@ -1586,7 +1595,7 @@ fn run_session(
     emit: impl Fn(Json),
     clocks: (Clock, Option<PtpMaster>),
 ) -> Result<()> {
-    options.validate()?;
+    if options.duration_ms == 0 { options.validate_start()?; } else { options.validate()?; }
     let standby = crate::standby::Control::new(options.standby);
     let mut takeovers = preemption::TakeoverCounters::default();
     if let Err(error) = run_stream(
@@ -1937,9 +1946,20 @@ fn run_stream(
     }
     let samples = if options.source == "wav" {
         load_quiet_wav(options)?
+    } else if options.source == "glow_test" {
+        crate::glow_protocol::test_samples(options.sample_rate)
     } else {
         Vec::new()
     };
+    if let Some(experiment) = options.glow_protocol {
+        options.sound_glow.reserve_comparison();
+        emit(json!({"event":"sound_glow_protocol_config", "media_remote":experiment.media_remote,
+            "source":options.source,"sample_rate":options.sample_rate,"gain":options.gain,
+            "artwork_sha256":crate::glow_protocol::artwork_hash(),"fixture_seconds":crate::glow_protocol::TEST_SECONDS,
+            "requested_profiles":options.peers.iter().map(|p|json!({"host":p.host,"volume":p.volume,
+                "transport":p.profile.transport,"timing":p.profile.timing,"follow":p.profile.follow_receiver_clock})).collect::<Vec<_>>(),
+            "message":"Protocol comparison v1; fixed artwork; no audio-driven metadata changes"}));
+    }
     #[cfg(windows)]
     let microphone = options
         .record_mic_path
@@ -2269,20 +2289,23 @@ fn send_packets(
             ))
         })
         .collect::<Vec<_>>();
-    let glow_worker = crate::sound_glow::Worker::start(
-        members
+    let glow_peers = members
             .iter()
             .zip(&positions)
             .map(|(m, position)| crate::sound_glow::Peer {
+                identity: m.glow_identity.clone(),
                 host: m.peer.host.to_string(),
                 uri: m.uri.clone(),
                 session: m.rtsp_session.clone(),
                 connection: m.conn.clone(),
                 position: position.clone(),
             })
-            .collect(),
-        options.sound_glow.clone(),
-    );
+            .collect();
+    let glow_worker = if let Some(experiment) = options.glow_protocol {
+        crate::sound_glow::Worker::start_comparison(glow_peers, experiment)
+    } else {
+        crate::sound_glow::Worker::start(glow_peers, options.sound_glow.clone())
+    };
     let glow_worker = match glow_worker {
         Ok(worker) => Some(worker),
         Err(error) => {
@@ -2746,7 +2769,11 @@ fn send_packets(
             } else {
                 for (j, bytes) in pcm.chunks_exact_mut(2).enumerate() {
                     let index = schedule.frames as usize * 2 + j;
-                    let sample = samples.get(index).copied().unwrap_or(0);
+                    let sample = if options.source == "glow_test" {
+                        let sample = samples[index % samples.len()];
+                        (sample as f32 * f32::from_bits(gain.load(Ordering::Relaxed))
+                            .clamp(0.0,1.0)).round() as i16
+                    } else { samples.get(index).copied().unwrap_or(0) };
                     bytes.copy_from_slice(&sample.to_be_bytes());
                 }
             }
@@ -4124,6 +4151,7 @@ mod tests {
         )
         .unwrap();
         let member = Member {
+            glow_identity: Default::default(),
             compat: crate::profile::CompatProfile::unnegotiated(),
             peer: Peer {
                 receiver_id: String::new(),
@@ -6634,6 +6662,7 @@ mod tests {
         parameters["intent"] = json!("unknown");
         assert!(serde_json::from_value::<ProbeOptions>(parameters).is_err());
         let mut o = ProbeOptions {
+            glow_protocol: None,
             intent: StartIntent::Manual,
             sound_glow: crate::sound_glow::Control::default(),
             peers: vec![Peer {

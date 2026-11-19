@@ -76,6 +76,7 @@ fn capabilities() -> Vec<&'static str> {
         "forced_latency",
         "adaptive_lead_v2",
         "sound_glow_test",
+        "sound_glow_protocol_v1",
     ];
     if airflash_engine::applications::supported() {
         values.push("application_capture");
