@@ -278,6 +278,10 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let connection = Connection::connect(listener.local_addr().unwrap(), Cancellation::default()).unwrap();
             let (socket, _) = listener.accept().unwrap();
+            // The real session retains the RTSP connection after initialization.
+            // Keep the same ownership here so the quiet-period check observes an
+            // open socket instead of EOF when the one-shot worker exits.
+            let connection = Arc::new(Mutex::new(connection));
             let expected = if mrp { 7 } else { 2 };
             let server = thread::spawn(move || {
                 let mut writer = socket.try_clone().unwrap();
@@ -293,7 +297,7 @@ mod tests {
             });
             let worker = Worker::start_comparison(vec![Peer {
                 identity: Default::default(), host:"127.0.0.1".into(), uri:"rtsp://127.0.0.1/test".into(),
-                session:Some("session-test".into()), connection:Arc::new(Mutex::new(connection)),
+                session:Some("session-test".into()), connection:connection.clone(),
                 position:Arc::new(AtomicU64::new(position(7,44100))),
             }], crate::glow_protocol::Experiment { media_remote:mrp }).unwrap();
             for _ in 0..expected {

@@ -5,7 +5,6 @@ import array
 import hashlib
 import math
 import os
-from pathlib import Path
 import queue
 import struct
 import subprocess
@@ -13,6 +12,7 @@ import tempfile
 import threading
 import time
 import wave
+from pathlib import Path
 
 
 def main():
@@ -58,24 +58,66 @@ def main():
     logfile = Path.cwd() / f"cliairplay-{stamp}-{args.transport}-mrp-{args.mrp}.log"
     stop = threading.Event()
     lines = queue.Queue()
-    with tempfile.TemporaryDirectory(prefix="glow-reference-") as temporary, logfile.open("w") as log:
+    with (
+        tempfile.TemporaryDirectory(prefix="glow-reference-") as temporary,
+        logfile.open("w") as log,
+    ):
         fifo = Path(temporary) / "commands"
         os.mkfifo(fifo, 0o600)
         command_fd = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
-        env = dict(os.environ, CLIAIRPLAY_MRP="1" if args.mrp == "on" else "0",
-                   CLIAIRPLAY_BUFFERED="1" if args.transport == "buffered" else "0",
-                   CLIAIRPLAY_PTP_FOLLOW="0")
-        command = [str(Path(args.binary).resolve()), "--protocol", "airplay2", "--ap2-native",
-                   "--ptp", "--port", "7000", "--latency", "1000", "--volume", str(args.volume),
-                   "--samplerate", "44100", "--bitdepth", "16", "--channels", "2", "--debug", "5",
-                   "--name", "AirFlash Protocol Test", "--txt", txt, "--cmdpipe", str(fifo)]
+        env = dict(
+            os.environ,
+            CLIAIRPLAY_MRP="1" if args.mrp == "on" else "0",
+            CLIAIRPLAY_BUFFERED="1" if args.transport == "buffered" else "0",
+            CLIAIRPLAY_PTP_FOLLOW="0",
+        )
+        command = [
+            str(Path(args.binary).resolve()),
+            "--protocol",
+            "airplay2",
+            "--ap2-native",
+            "--ptp",
+            "--port",
+            "7000",
+            "--latency",
+            "1000",
+            "--volume",
+            str(args.volume),
+            "--samplerate",
+            "44100",
+            "--bitdepth",
+            "16",
+            "--channels",
+            "2",
+            "--debug",
+            "5",
+            "--name",
+            "AirFlash Protocol Test",
+            "--txt",
+            txt,
+            "--cmdpipe",
+            str(fifo),
+        ]
         if args.interface:
             command += ["--if", args.interface]
         command += [args.host]
-        log.write(f"reference=0a58c239d5fb3cf8927b9707a71c6fe897266b6a (verify your binary source)\n")
-        log.write(f"mrp={args.mrp} transport={args.transport} volume={args.volume} gain={args.gain}\n")
-        log.write(f"pcm_sha256={hashlib.sha256(pcm).hexdigest()} artwork_sha256={hashlib.sha256(art.read_bytes()).hexdigest()}\n")
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+        log.write(
+            "reference=0a58c239d5fb3cf8927b9707a71c6fe897266b6a (verify your binary source)\n"
+        )
+        log.write(
+            f"mrp={args.mrp} transport={args.transport} volume={args.volume} gain={args.gain}\n"
+        )
+        log.write(
+            f"pcm_sha256={hashlib.sha256(pcm).hexdigest()} "
+            f"artwork_sha256={hashlib.sha256(art.read_bytes()).hexdigest()}\n"
+        )
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
 
         def read_logs():
             for raw in iter(process.stdout.readline, b""):
@@ -91,7 +133,7 @@ def main():
                     for offset in range(0, len(pcm), 352 * 4):
                         if stop.is_set():
                             return
-                        process.stdin.write(pcm[offset:offset + 352 * 4])
+                        process.stdin.write(pcm[offset : offset + 352 * 4])
                         process.stdin.flush()
             except (BrokenPipeError, OSError):
                 pass
@@ -108,7 +150,9 @@ def main():
             deadline = time.monotonic() + 35
             while not (clock_ready and audio_ready):
                 if process.poll() is not None:
-                    raise RuntimeError(f"cliairplay exited: {process.returncode}; inspect {logfile}")
+                    raise RuntimeError(
+                        f"cliairplay exited: {process.returncode}; inspect {logfile}"
+                    )
                 if time.monotonic() > deadline:
                     raise TimeoutError("PTP/audio not ready; trial invalid. See log.")
                 try:
@@ -117,13 +161,19 @@ def main():
                     continue
                 clock_ready |= "clock_ready mode=ptp state=ready" in line
                 audio_ready |= "[STATUS] audio buffered_ms=" in line
-            send("TITLE=AirFlash Sound Glow Protocol Test\nARTIST=AirFlash\nALBUM=Fixed Input Comparison v1\nITEMID=airflash-glow-protocol-v1\nSTART_UNIX_MS=0\nACTION=START\n")
+            send(
+                "TITLE=AirFlash Sound Glow Protocol Test\nARTIST=AirFlash\n"
+                "ALBUM=Fixed Input Comparison v1\nITEMID=airflash-glow-protocol-v1\n"
+                "START_UNIX_MS=0\nACTION=START\n"
+            )
             began = time.monotonic()
             time.sleep(1)
             send("ACTION=SENDMETA\n")
             time.sleep(2)
             send(f"ARTWORK={art}\n")
-            print("Fixed inputs sent. Observe native lighting; no more artwork updates.", flush=True)
+            print(
+                "Fixed inputs sent. Observe native lighting; no more artwork updates.", flush=True
+            )
             while time.monotonic() - began < args.seconds:
                 if process.poll() is not None:
                     raise RuntimeError("Client stopped before trial end; inspect log.")
